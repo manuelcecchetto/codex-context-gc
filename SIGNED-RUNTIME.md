@@ -1,12 +1,12 @@
-# Signed-runtime adapter (experimental)
+# Signed-runtime adapter
 
 The original Rust patch replaces the app's signed CLI with a locally built CLI. On macOS, the in-app browser and app-tools bridges can reject that process with `missing-code-signing-identity`.
 
-This candidate keeps the original OpenAI-signed CLI. A small local Python adapter adds the GC tool through the app-server protocol. The desktop-launched process executes the original binary at the same PID, retaining its desktop parent; a child handles stdio forwarding. The app bundle and native peer authorization remain unchanged.
+The default desktop adapter keeps the original OpenAI-signed CLI. A small local Python adapter adds the GC tool through the app-server protocol. The desktop-launched process executes the original binary at the same PID, retaining its desktop parent; a child handles stdio forwarding. The app bundle and native peer authorization remain unchanged.
 
-**Status:** local integration tests pass against the pinned bundled runtime, including six compactions within an active goal. Live desktop browser and app-tools reads passed after relaunch. The first desktop run did not receive the GC tool: a subcommand configuration flag discarded the root-level hook overrides. Coordinator flags now follow the desktop arguments in the app-server scope. The exact desktop-argument regression passes; live GC verification after relaunch passed on 2026-09-19. A fresh desktop task completed native compaction, automatic continuation, exact checkpoint preservation, and shell plus in-app browser access after compaction. The full saved checkpoint also matches the persisted rollout. Redacted startup/registration counters are saved as `adapter-<pid>.status` in the checkpoint directory for diagnosis. This candidate has passed one live desktop end-to-end handoff; broader failure-recovery validation remains outstanding.
+**Status:** local integration tests pass against the pinned bundled runtime, including six compactions within an active goal. Live desktop browser and app-tools reads passed after relaunch. The first desktop run did not receive the GC tool: a subcommand configuration flag discarded the root-level hook overrides. Coordinator flags now follow the desktop arguments in the app-server scope. The exact desktop-argument regression passes; live GC verification after relaunch passed on 2026-09-19. A fresh desktop task completed native compaction, automatic continuation, exact checkpoint preservation, and shell plus in-app browser access after compaction. The full saved checkpoint also matches the persisted rollout. Redacted startup/registration counters are saved as `adapter-<pid>.status` in the checkpoint directory for diagnosis. The adapter has passed one live desktop end-to-end handoff; broader failure-recovery validation remains outstanding.
 
-## Try the candidate
+## Launch the adapter
 
 Requires macOS, Python 3, and the exact app CLI version in `manifest.json`. No Rust build is needed.
 

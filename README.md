@@ -1,152 +1,99 @@
 # Codex Context GC
 
-**Candidate browser repair:** the `signed-runtime-adapter` branch includes an experimental adapter that keeps the original signed CLI. See [SIGNED-RUNTIME.md](SIGNED-RUNTIME.md) for tests, launch instructions, and the remaining live desktop verification. The original installer below still builds the custom CLI.
+Expose `compact_context` so the model can compact after a verified phase, before carrying old tool results into the next phase. Codex runs its native compaction, the complete model-authored checkpoint is appended, and work continues automatically.
 
-**Let the model compact at sensible work boundaries, instead of waiting for the context window to fill.**
+The default desktop setup now uses the **original OpenAI-signed runtime** with a small Python adapter. No Rust build or app-bundle modification is required. Native compaction, checkpoint preservation, automatic continuation, and shell plus in-app browser access after compaction passed a live desktop test.
 
-This small, experimental patch adds a `compact_context` tool to Codex. The model records what it has learned, asks Codex to run its native compaction, and continues the same task with those notes intact.
-
-**Known macOS desktop incompatibility:** the custom-built CLI can be rejected by the in-app browser and dynamic app-tools bridges with `missing-code-signing-identity`. This is reproduced in the author's desktop logs. The published build is **not fully desktop-compatible**. If you need these integrations, keep using the stock desktop executable. See [browser compatibility](#browser-compatibility) below.
-
-Inspired by [pi-context-gc](https://github.com/manuelcecchetto/pi-context-gc). Unofficial; not an OpenAI product.
+Unofficial; not an OpenAI product. Inspired by [pi-context-gc](https://github.com/manuelcecchetto/pi-context-gc).
 
 ## Install: ask Astra
 
-Paste this into a Codex task using Astra:
+> Install https://github.com/manuelcecchetto/codex-context-gc for my local Codex desktop app. Follow README.md and INSTALL.md, use the signed-runtime adapter, check compatibility, and install the included compaction instructions while preserving my existing setup. Test it and give me the launch command. Don't quit my running app.
 
-> Install https://github.com/manuelcecchetto/codex-context-gc for my local Codex desktop app. Read its README.md and INSTALL.md, check compatibility, and use its included compaction instructions. Preserve my existing setup and instructions. Build and test the patch, then give me the launch command. Don't quit my running app.
+Tested on macOS with the `ChatGPT.app` bundle and bundled CLI `0.155.0-alpha.9`. The launcher checks the exact CLI version and OpenAI signing identity. Other versions and platforms need separate verification.
 
-**Build and compaction tests:** macOS, Codex CLI `0.155.0-alpha.9`, desktop bundle `ChatGPT.app`. The installer checks the bundled CLI version, not the app's display version. Other operating systems and versions need a port and verification; the installer will not force an incompatible build.
+## Manual setup
 
-The repo ships source and a patch, not a prebuilt executable. The first Rust build can take a while and requires substantial free disk space.
-
-## What changes
-
-1. The model finishes a phase and verifies its result.
-2. It calls `compact_context` with the objective, useful facts, proof, open work, and the next step.
-3. Codex finishes the complete tool batch and runs its existing native compaction.
-4. The complete checkpoint is appended to the compacted context, and work resumes in the same turn.
-
-The checkpoint is the **tool-call arguments**, separate from the native compaction summary. No byte limit, list-length limit, or truncation is applied to it. JSON formatting is normalized and omitted optional lists become empty; all supplied string content and list entries survive. Large checkpoints still consume context, so keep useful facts rather than raw logs.
-
-The tool accepts:
-
-```json
-{
-  "completed_phase": "Found and verified the bug",
-  "next_focus": "Implement the fix, then run the regression test",
-  "keep": ["Root cause and the relevant file/function", "User's scope and constraints"],
-  "open_loops": ["Fix is not implemented yet"],
-  "ruled_out": ["The cache is not responsible"],
-  "verification": ["The regression test fails for the intended reason"]
-}
-```
-
-`completed_phase`, `next_focus`, `keep`, and `verification` are required and must contain meaningful, nonempty content. Pending user input cancels the request. Duplicate pending requests are rejected. There is no per-turn compaction count limit: long-running goals can compact at as many verified boundaries as the work needs. Checkpoints are explicitly marked as model-authored working state, never new user authorization.
-
-Normal automatic compaction remains enabled. Token-budget mode keeps its existing `new_context` mechanism and does not expose this tool. Native compaction errors are still errors; this patch removes checkpoint-size rejection, not every possible compaction failure.
-
-## More or less aggressive
-
-We ship **one default: the exact phase-boundary instructions used in the author's daily Codex workflow**, in [AGENTS-snippet.md](AGENTS-snippet.md). There are no untested preset modes.
-
-The model compacts after a verified phase, before materially different work, when the old working context is no longer needed. It keeps unresolved investigation together and carries the objective, constraints, useful facts, commands, proof, and next steps forward.
-
-Install those instructions from the cloned repo:
-
-```sh
-python3 manage.py instructions install
-```
-
-This adds a marked block to `$CODEX_HOME/AGENTS.md` (default `~/.codex/AGENTS.md`), preserves other content, and saves a backup before changes. Start a new task to load it. Existing unmarked GC instructions cause a clear refusal: ask your agent to merge the included snippet into them rather than add conflicting rules.
-
-**Tune the instructions, without rebuilding.** For example, ask Astra:
-
-> Make my context GC more aggressive: prefer smaller verified phase boundaries, while keeping unresolved debugging work together.
-
-Or:
-
-> Make my context GC less aggressive: compact only at major phase boundaries when substantial old context can be discarded.
-
-These are changes to model judgment, not token thresholds or guaranteed schedules. Edit the managed instruction block directly, or ask Astra to do it. Rerunning `instructions install` restores the shipped wording, so don't use it after customization unless you want that reset. Project instructions can also affect the behavior; see [Codex's AGENTS.md documentation](https://learn.chatgpt.com/docs/agent-configuration/agents-md).
-
-## Manual installation
-
-Prerequisites: macOS Command Line Tools (`xcode-select --install`), Git, Python 3.9+, Rust via [rustup](https://rustup.rs/), [just](https://github.com/casey/just), and [cargo-nextest](https://nexte.st/docs/installation/). The pinned Codex source selects Rust `1.95.0`. Install missing build dependencies from their official sources; the installer does not install them for you.
+Requires Git and Python 3.9+; keep the cloned repository in place.
 
 ```sh
 git clone https://github.com/manuelcecchetto/codex-context-gc.git
 cd codex-context-gc
-python3 manage.py install
+python3 stock_gc_launch.py --check
 python3 manage.py instructions install
 ```
 
-The installer fetches the pinned upstream tag, verifies its exact commit, checks and applies the patch, runs the targeted compaction tests, builds a separate debug executable, and tests app-server initialization in an isolated temporary Codex home. It also provisions the matching bundled code-mode companion. It does not use credentials or make a model call for the smoke test.
+The instruction command preserves unrelated content in `$CODEX_HOME/AGENTS.md` (default `~/.codex/AGENTS.md`) and backs it up before changes. If you already have unmarked GC instructions, ask your agent to merge [AGENTS-snippet.md](AGENTS-snippet.md) into them.
 
-Default installation directory: `~/.local/share/codex-context-gc`. To choose another directory or app location:
-
-```sh
-python3 manage.py --prefix "$HOME/.local/share/codex-context-gc-custom" install --app "/Applications/ChatGPT.app"
-```
-
-An existing source directory is never overwritten. After a failed build, ask your agent to diagnose the saved checkout, or choose a fresh prefix. Keep using the same `--prefix` for launch.
-
-### Launch
-
-Quit the desktop app normally when convenient, then run from this repo:
+Quit the app normally, then launch from the repository:
 
 ```sh
-python3 manage.py launch
+python3 stock_gc_launch.py
 ```
 
-The launcher sets `CODEX_CLI_PATH` for this app process only. It checks both CLI versions, checks the companion executable, and refuses to start while the app is already running. It never terminates your app or modifies the signed bundle, global environment, authentication, or model settings.
+For a different app location, pass `--app /path/to/ChatGPT.app`. Start a **new task**: tasks created before installing the adapter do not automatically acquire the tool. Use this launcher on subsequent starts. It refuses to terminate an already running app and changes only the environment of the app it launches.
 
-**Use this launcher each time you want the patch.** Launching normally from Finder or the Dock uses the stock executable. There is no background updater or persistent app replacement.
+Ask the new task to test `compact_context`, then verify shell and Codex in-app browser access after automatic continuation.
 
-### Verify in a fresh task
+### Existing Rust-patch users
 
-Ask Astra to complete a small read-only investigation, record a checkpoint, call `compact_context`, then continue with a second step. Check that the tool is available, native compaction happens, the checkpoint appears afterward, and shell tools work both before and after. Installation tests are useful, but this live check establishes that your desktop actually loaded the patch.
+Update the repository to `main`, run the check above, quit normally, and use `stock_gc_launch.py` instead of the previous launcher. Keep your existing GC instructions. No rebuild is needed; you may retain the old build for rollback. `manage.py install`, `manage.py launch`, and `manage.py doctor` are **legacy Rust-build commands**, not the default desktop setup.
 
-### Undo
+## How it works
 
-Quit the app and reopen it normally from Finder or the Dock. To remove this repo's instruction block:
+1. The model finishes and verifies a phase.
+2. It calls `compact_context` alone with useful working state, then ends the phase turn.
+3. Native lifecycle hooks coordinate compaction and insert the complete checkpoint before continuation.
+4. Work continues in a **new turn within the same task**. Active goals use Codex's own continuation scheduler.
+
+The checkpoint is the tool-call arguments, separate from the native summary:
+
+```json
+{
+  "completed_phase": "Located and verified the bug",
+  "next_focus": "Implement the fix and run the regression test",
+  "keep": ["Objective, scope, constraints, relevant paths and findings"],
+  "verification": ["Regression test fails for the intended reason"],
+  "open_loops": ["Fix remains to be implemented"],
+  "ruled_out": ["Cache invalidation is not responsible"]
+}
+```
+
+The first four fields are required. There is no checkpoint byte cap, list-length cap, truncation, or compaction-count cap. JSON formatting is normalized and omitted optional lists become empty; supplied string values and list entries are preserved. Checkpoints are marked as model-authored state, not new user authorization. New user input cancels pending automatic continuation. Normal native automatic compaction remains enabled.
+
+## More or less aggressive
+
+[AGENTS-snippet.md](AGENTS-snippet.md) contains the phase-boundary instructions used in the author's workflow. There are no preset modes. Ask Astra to edit your instructions to prefer smaller verified phases for more frequent compaction, or major boundaries with substantial obsolete context for less frequent compaction. Keep unresolved investigations together.
+
+These are model instructions, not token thresholds or guaranteed schedules. Rerunning `instructions install` restores the shipped wording, so avoid that after customization unless you want to reset it.
+
+## Browser compatibility
+
+The original custom Rust binary caused `missing-code-signing-identity` failures in the desktop browser and app-tools bridges. The signed-runtime adapter preserves the original signed CLI and its desktop parent. It does not disable peer authorization, re-sign binaries, or modify the app bundle.
+
+Live verification on 2026-09-19 passed native compaction, automatic continuation, complete checkpoint preservation, and post-compaction shell and in-app browser access. A separate app-tools read also passed. See [SIGNED-RUNTIME.md](SIGNED-RUNTIME.md) for the implementation and validation details. The old build is retained under [LEGACY-RUST.md](LEGACY-RUST.md).
+
+## Validation and limitations
+
+The 21-test suite includes real bundled-runtime tests with a localhost fixture provider: ordinary continuation, six compactions in an active goal, goal completion, and the desktop's configuration-argument ordering. These tests use an isolated home and make no paid model calls.
+
+```sh
+CODEX_GC_TEST_STOCK=/Applications/ChatGPT.app/Contents/Resources/codex \
+  python3 -m unittest discover -s tests -v
+```
+
+This remains experimental. Live desktop proof covers one end-to-end handoff, not every failure case or workflow. Crash recovery, forked-task inheritance, and broader failure recovery need further validation. A finished phase may display as interrupted during handoff. Checkpoints persist with owner-only permissions in `$CODEX_HOME/context-gc-checkpoints/` and may contain private task state. Native compaction and checkpoint insertion are not one atomic operation.
+
+Provider context limits still apply. Earlier compaction can discard useful information; large checkpoints consume context. Cost and quality gains are not guaranteed, and measurements from the original Rust patch are not benchmarks of this adapter.
+
+An app update may change the bundled CLI. Do not bypass the version guard: ask your agent to adapt and test the adapter against the new protocol and hooks before changing the pinned version.
+
+## Undo
+
+Quit and reopen the app normally from Finder or the Dock. To remove the managed instruction block:
 
 ```sh
 python3 manage.py instructions off
 ```
 
-`off` removes the managed guidance; it does not hide the tool in a patched executable or disable native automatic compaction. You can remove the cloned repo and separate installation directory later after preserving anything you want to keep.
-
-## Browser compatibility
-
-The macOS desktop app authenticates local bridge clients using code-signing identities. The bundled Codex executable is OpenAI-signed; a local Rust build has an ad-hoc signature without OpenAI's team identity. Desktop logs show both browser and dynamic app-tools socket rejections with `missing-code-signing-identity`. The in-app browser may be missing from the tool inventory or report "Browser not available" while the normal app browser UI remains usable. Other desktop integrations using the same bridge may also be affected.
-
-This is a compatibility defect of the custom-executable installation approach, not evidence of failed compaction. The installer and app-server smoke test did not exercise these bridges. Matching the CLI version and linking the bundled code-mode host are insufficient. Self-signing cannot reproduce OpenAI's signing identity. This repository does not disable peer authorization or modify the signed app bundle.
-
-Inspect an installation without changing it:
-
-```sh
-python3 manage.py doctor
-```
-
-For a custom installation prefix, put `--prefix /path/to/install` before `doctor`. The command shows the bundled and custom executable signing metadata; it does not claim live browser compatibility.
-
-**Recovery:** quit the app normally and reopen it from Finder or the Dock, without the custom launcher. This restores the stock executable and removes this patch's `compact_context` tool. Confirm that your browser tools work again. External Chrome remained available in the author's session, but it is not a fix for the in-app browser integration.
-
-There is no verified fix that preserves both this custom executable and the signed desktop bridge. A future solution requires a supported integration with the stock runtime or an upstream change. Do not describe this issue as fixed until the in-app browser and dynamic app tools have been tested with the actual patched installation.
-
-## App updates and compatibility
-
-An app update may change its bundled CLI. The launcher deliberately refuses a mismatch. Ask Astra:
-
-> Update my codex-context-gc installation for the CLI bundled with my current app. Port the patch to the matching upstream source, preserve its compaction and checkpoint guarantees, run the regression tests, and prepare a new separate build. Don't bypass the version check or quit my running app.
-
-See [INSTALL.md](INSTALL.md) for the agent procedure. A newer version is **not** supported merely because the patch applies cleanly.
-
-## Validation and limitations
-
-The published Rust patch passed 18 targeted integration/regression tests, including complete tool-batch preservation, user steering cancellation, same-turn continuation through six compactions, native remote compaction, and checkpoint roundtrips with 70 KB of Unicode and 100 list entries. The debug binary built and isolated app-server initialization passed. The full upstream test suite was not run. A previous version had a successful live desktop compaction; that is not a live validation of every new build or installation.
-
-Checkpoint insertion follows native history replacement; the two are not one transactional write. A crash between them may require recovering notes from the original rollout. Provider context limits still apply. Earlier compaction can discard useful context, and large checkpoints can reduce the benefit. More aggressive is not automatically better; no cost or quality improvement is guaranteed.
-
-The upstream-derived patch and installer are Apache-2.0 licensed; see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+This preserves your tasks, rollouts, and unrelated configuration. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for licensing.
