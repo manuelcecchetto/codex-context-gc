@@ -93,7 +93,7 @@ requires_openai_auth = false
             env.pop('OPENAI_API_KEY', None)
             with tempfile.TemporaryFile() as errors:
                 proc = subprocess.Popen([sys.executable, str(ROOT / 'stock_gc.py'), 'app-server',
-                                         '--listen', 'stdio://'], stdin=subprocess.PIPE,
+                                         '--listen', 'stdio://', '-c', 'plugins.codex-app-tools@openai-bundled.mcp_servers.codex_app.enabled=true'], stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE, stderr=errors, env=env)
                 def send(i, method, params):
                     proc.stdin.write((json.dumps({'id': i, 'method': method, 'params': params}) + '\n').encode())

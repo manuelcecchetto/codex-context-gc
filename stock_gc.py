@@ -387,7 +387,9 @@ def main():
     flags = []
     for event in ('Stop', 'PostCompact'):
         flags += ['-c', 'hooks.' + event + '=[{hooks=[{type="command",command=' + json.dumps(command) + ',timeout=30}]}]']
-    os.execv(stock, [str(stock), *flags, *args])
+    # Keep coordinator overrides in the app-server scope. Later subcommand -c
+    # arguments otherwise replace the root-level override list in clap.
+    os.execv(stock, [str(stock), *args, *flags])
 
 
 if __name__ == '__main__':
