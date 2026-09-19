@@ -1,5 +1,7 @@
 # Codex Context GC
 
+**Candidate browser repair:** the `signed-runtime-adapter` branch includes an experimental adapter that keeps the original signed CLI. See [SIGNED-RUNTIME.md](SIGNED-RUNTIME.md) for tests, launch instructions, and the remaining live desktop verification. The original installer below still builds the custom CLI.
+
 **Let the model compact at sensible work boundaries, instead of waiting for the context window to fill.**
 
 This small, experimental patch adds a `compact_context` tool to Codex. The model records what it has learned, asks Codex to run its native compaction, and continues the same task with those notes intact.
