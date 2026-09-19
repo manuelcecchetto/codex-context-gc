@@ -1,0 +1,9 @@
+{
+  "upstream": "https://github.com/openai/codex.git",
+  "tag": "rust-v0.155.0-alpha.9",
+  "commit": "434535bddfaf405a032f57be3c1096dd25ff6312",
+  "version": "0.155.0-alpha.9",
+  "platform": "macOS",
+  "checkpoint_size_cap": null,
+  "max_compactions_per_turn": null
+}

@@ -1,0 +1,5 @@
+## Semantic context compaction
+
+When `compact_context` is available, use it after a verified phase completes and before materially different work, when the previous working context is no longer needed. Preserve the overall objective, user constraints, relevant paths, decisions, unresolved work, and concrete verification. Make `next_focus` an actionable next step. Carry still-relevant facts into each new checkpoint; resume without repeating completed investigation. Follow the tool's limits and avoid compaction during unresolved investigation or immediately before the final answer.
+
+Favor compaction at these boundaries when old context contains long command outputs or investigation details whose useful conclusions are already established and whose raw content is no longer needed. Preserve the exact reusable commands, relevant paths, conclusions, and verification evidence in the checkpoint, rather than the full output. Long output alone is not a reason to compact while its interpretation or the investigation remains unresolved.

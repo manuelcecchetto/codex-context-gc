@@ -1,0 +1,30 @@
+name: check
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python3 -m unittest discover -s tests -v
+      - name: Check patch against pinned upstream
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, tempfile
+          from pathlib import Path
+          root = Path.cwd()
+          manifest = json.loads((root / 'manifest.json').read_text())
+          with tempfile.TemporaryDirectory() as directory:
+              def git(*args):
+                  return subprocess.check_output(['git', '-C', directory, *args], text=True).strip()
+              git('init')
+              git('remote', 'add', 'origin', manifest['upstream'])
+              git('fetch', '--depth=1', 'origin', 'refs/tags/' + manifest['tag'])
+              git('checkout', '--detach', 'FETCH_HEAD')
+              assert git('rev-parse', 'HEAD') == manifest['commit']
+              git('apply', '--check', str(root / 'compact-context.patch'))
+          PY

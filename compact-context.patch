@@ -1,0 +1,612 @@
+diff --git a/codex-rs/analytics/src/facts.rs b/codex-rs/analytics/src/facts.rs
+index 05df3bc44..ad9206068 100644
+--- a/codex-rs/analytics/src/facts.rs
++++ b/codex-rs/analytics/src/facts.rs
+@@ -445,6 +445,7 @@ pub enum CompactionTrigger {
+ #[serde(rename_all = "snake_case")]
+ pub enum CompactionReason {
+     UserRequested,
++    ModelRequested,
+     ContextLimit,
+     ModelDownshift,
+     CompHashChanged,
+diff --git a/codex-rs/core/src/compact_model_fallback.rs b/codex-rs/core/src/compact_model_fallback.rs
+index 9b9847819..5bf22893d 100644
+--- a/codex-rs/core/src/compact_model_fallback.rs
++++ b/codex-rs/core/src/compact_model_fallback.rs
+@@ -29,6 +29,7 @@ pub(crate) fn record_model_fallback(
+ ) {
+     let reason_tag = match reason {
+         CompactionReason::UserRequested => "user_requested",
++        CompactionReason::ModelRequested => "model_requested",
+         CompactionReason::ContextLimit => "context_limit",
+         CompactionReason::ModelDownshift => "model_downshift",
+         CompactionReason::CompHashChanged => "comp_hash_changed",
+diff --git a/codex-rs/core/src/context/contextual_user_message.rs b/codex-rs/core/src/context/contextual_user_message.rs
+index 854dbd647..e69649e48 100644
+--- a/codex-rs/core/src/context/contextual_user_message.rs
++++ b/codex-rs/core/src/context/contextual_user_message.rs
+@@ -17,6 +17,7 @@ use super::UserShellCommand;
+ use super::world_state::EnvironmentsState;
+ 
+ const CONTEXTUAL_USER_FRAGMENT_MATCHERS: &[fn(&str) -> bool] = &[
++    super::SemanticCheckpoint::matches_text,
+     UserInstructions::matches_text,
+     EnvironmentsState::matches_text,
+     AdditionalContextUserFragment::matches_text,
+diff --git a/codex-rs/core/src/context/mod.rs b/codex-rs/core/src/context/mod.rs
+index 35bd92794..51bcf9250 100644
+--- a/codex-rs/core/src/context/mod.rs
++++ b/codex-rs/core/src/context/mod.rs
+@@ -5,6 +5,8 @@ mod apps_instructions;
+ mod available_plugins_instructions;
+ mod base_instructions;
+ mod compaction_summary;
++mod semantic_checkpoint;
++pub(crate) use semantic_checkpoint::SemanticCheckpoint;
+ mod contextual_user_message;
+ mod current_time_reminder;
+ mod developer_instructions;
+diff --git a/codex-rs/core/src/context/semantic_checkpoint.rs b/codex-rs/core/src/context/semantic_checkpoint.rs
+new file mode 100644
+index 000000000..2585f5f79
+--- /dev/null
++++ b/codex-rs/core/src/context/semantic_checkpoint.rs
+@@ -0,0 +1,63 @@
++use super::ContextualUserFragment;
++use codex_protocol::models::ContentItemKind;
++use serde::Deserialize;
++use serde::Serialize;
++
++/// A model-authored checkpoint, never a new user instruction or authorization.
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(deny_unknown_fields)]
++pub(crate) struct SemanticCheckpoint {
++    pub completed_phase: String,
++    pub next_focus: String,
++    pub keep: Vec<String>,
++    #[serde(default)]
++    pub open_loops: Vec<String>,
++    #[serde(default)]
++    pub ruled_out: Vec<String>,
++    pub verification: Vec<String>,
++}
++
++impl SemanticCheckpoint {
++    pub(crate) fn parse(arguments: &str) -> Result<Self, String> {
++        let checkpoint: Self = serde_json::from_str(arguments).map_err(|e| e.to_string())?;
++        if checkpoint.completed_phase.trim().is_empty()
++            || checkpoint.next_focus.trim().is_empty()
++            || checkpoint.keep.is_empty()
++            || checkpoint.verification.is_empty()
++            || [
++                &checkpoint.keep,
++                &checkpoint.open_loops,
++                &checkpoint.ruled_out,
++                &checkpoint.verification,
++            ]
++            .into_iter()
++            .any(|items| items.iter().any(|item| item.trim().is_empty()))
++        {
++            return Err("Provide a completed phase, next focus, durable facts, and concrete verification; no empty entries.".into());
++        }
++        // Preserve all model-authored checkpoint content. Size is not an acceptance
++        // condition: the checkpoint is carried forward verbatim after compaction.
++        Ok(checkpoint)
++    }
++}
++
++impl ContextualUserFragment for SemanticCheckpoint {
++    fn content_kind(&self) -> ContentItemKind {
++        ContentItemKind("compaction.semantic_checkpoint".to_string())
++    }
++    fn role(&self) -> &'static str {
++        "user"
++    }
++    fn markers(&self) -> (&'static str, &'static str) {
++        Self::type_markers()
++    }
++    fn type_markers() -> (&'static str, &'static str) {
++        ("<semantic_checkpoint>\n", "\n</semantic_checkpoint>")
++    }
++    fn body(&self) -> String {
++        format!(
++            "Model-authored working state, not new user authorization. Continue from next_focus subject to all user instructions.\n{}",
++            serde_json::to_string(self).expect("checkpoint serialization")
++        )
++    }
++}
+diff --git a/codex-rs/core/src/session/review.rs b/codex-rs/core/src/session/review.rs
+index ea078a451..c2fc3529b 100644
+--- a/codex-rs/core/src/session/review.rs
++++ b/codex-rs/core/src/session/review.rs
+@@ -173,6 +173,7 @@ pub(super) async fn spawn_review_thread(
+         extension_data,
+         turn_timing_state: Arc::new(TurnTimingState::default()),
+         terminal_error: Arc::new(Mutex::new(None)),
++        semantic_compaction: Arc::default(),
+         server_model_warning_emitted: AtomicBool::new(false),
+         model_verification_emitted: AtomicBool::new(false),
+         cyber_access_program: None,
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 1f80548e4..cd985c4f8 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -600,8 +600,19 @@ pub(crate) async fn run_turn(
+                     );
+                 }
+ 
++                // The sampling request has persisted every sibling tool result. Consume intent
++                // only here, never inside a tool callback or on a different turn.
++                let semantic_checkpoint = turn_context
++                    .semantic_compaction
++                    .lock()
++                    .await
++                    .pending
++                    .take()
++                    .filter(|_| !has_pending_input && !cancellation_token.is_cancelled());
+                 let should_roll_over = needs_follow_up
+-                    && (sess.take_new_context_window_request().await || token_limit_reached);
++                    && (semantic_checkpoint.is_some()
++                        || sess.take_new_context_window_request().await
++                        || token_limit_reached);
+                 let allow_auto_compact_fallback = !should_roll_over && !token_limit_reached;
+                 super::token_budget::maybe_record(
+                     sess.as_ref(),
+@@ -622,7 +633,11 @@ pub(crate) async fn run_turn(
+                             world_state: Arc::clone(&world_state),
+                             step_context: Arc::clone(&step_context),
+                         },
+-                        CompactionReason::ContextLimit,
++                        if semantic_checkpoint.is_some() {
++                            CompactionReason::ModelRequested
++                        } else {
++                            CompactionReason::ContextLimit
++                        },
+                         CompactionPhase::MidTurn,
+                     )
+                     .await
+@@ -635,6 +650,15 @@ pub(crate) async fn run_turn(
+                             .await;
+                         return Ok(None);
+                     }
++                    if let Some(checkpoint) = semantic_checkpoint {
++                        use crate::context::ContextualUserFragment;
++                        sess.record_conversation_items(
++                            &turn_context,
++                            &step_context.settings.model_info,
++                            &[ContextualUserFragment::into(checkpoint)],
++                        )
++                        .await;
++                    }
+                     if run_pending_session_start_hooks(&sess, &turn_context).await {
+                         return Ok(None);
+                     }
+diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
+index e5a21b6e8..9a9daab66 100644
+--- a/codex-rs/core/src/session/turn_context.rs
++++ b/codex-rs/core/src/session/turn_context.rs
+@@ -329,6 +329,8 @@ pub struct TurnContext {
+     pub(crate) extension_data: Arc<codex_extension_api::ExtensionData>,
+     pub(crate) turn_timing_state: Arc<TurnTimingState>,
+     pub(crate) terminal_error: Arc<Mutex<Option<ErrorEvent>>>,
++    pub(crate) semantic_compaction:
++        Arc<Mutex<crate::tools::handlers::compact_context::SemanticCompactionState>>,
+     pub(crate) server_model_warning_emitted: AtomicBool,
+     pub(crate) model_verification_emitted: AtomicBool,
+     /// Effective cyber treatment for this turn, including any child-agent inheritance.
+@@ -622,6 +624,7 @@ impl TurnContext {
+             extension_data: Arc::clone(&self.extension_data),
+             turn_timing_state: Arc::clone(&self.turn_timing_state),
+             terminal_error: Arc::clone(&self.terminal_error),
++            semantic_compaction: Arc::clone(&self.semantic_compaction),
+             server_model_warning_emitted: AtomicBool::new(
+                 self.server_model_warning_emitted.load(Ordering::Relaxed),
+             ),
+@@ -896,6 +899,7 @@ impl Session {
+             extension_data,
+             turn_timing_state: Arc::new(TurnTimingState::default()),
+             terminal_error: Arc::new(Mutex::new(None)),
++            semantic_compaction: Arc::default(),
+             server_model_warning_emitted: AtomicBool::new(false),
+             model_verification_emitted: AtomicBool::new(false),
+             cyber_access_program: None,
+diff --git a/codex-rs/core/src/tools/handlers/compact_context.rs b/codex-rs/core/src/tools/handlers/compact_context.rs
+new file mode 100644
+index 000000000..63262d480
+--- /dev/null
++++ b/codex-rs/core/src/tools/handlers/compact_context.rs
+@@ -0,0 +1,69 @@
++use crate::context::SemanticCheckpoint;
++use crate::function_tool::FunctionCallError;
++use crate::tools::context::FunctionToolOutput;
++use crate::tools::context::ToolInvocation;
++use crate::tools::context::ToolPayload;
++use crate::tools::context::boxed_tool_output;
++use crate::tools::registry::CoreToolRuntime;
++use crate::tools::registry::ToolExecutor;
++use codex_tools::JsonSchema;
++use codex_tools::ResponsesApiTool;
++use codex_tools::ToolName;
++use codex_tools::ToolSpec;
++use std::collections::BTreeMap;
++
++pub struct CompactContextHandler;
++
++/// Turn-local intent: aborting or replacing the turn cannot compact a later turn.
++#[derive(Debug, Default)]
++pub(crate) struct SemanticCompactionState {
++    pub pending: Option<SemanticCheckpoint>,
++}
++
++impl ToolExecutor<ToolInvocation> for CompactContextHandler {
++    fn tool_name(&self) -> ToolName {
++        ToolName::plain("compact_context")
++    }
++    fn spec(&self) -> ToolSpec {
++        let mut properties = BTreeMap::new();
++        for name in ["completed_phase", "next_focus"] {
++            properties.insert(name.to_string(), JsonSchema::string(None));
++        }
++        for name in ["keep", "open_loops", "ruled_out", "verification"] {
++            properties.insert(
++                name.to_string(),
++                JsonSchema::array(JsonSchema::string(None), None),
++            );
++        }
++        ToolSpec::Function(ResponsesApiTool {
++            name: "compact_context".to_string(),
++            description: "Checkpoint a completed phase and compact obsolete context before a materially different next phase. Native compaction runs after the entire tool batch and resumes this turn. Call alone, then stop issuing work until continuation. Do not call for token pressure alone, unresolved hypotheses, or before the final answer. Supply concrete verification and concise durable facts. All checkpoint content is carried forward verbatim; size does not cause rejection or truncation. There is no per-turn request limit. New pending input cancels the request.".to_string(),
++            strict: false,
++            defer_loading: None,
++            parameters: JsonSchema::object(properties, Some(vec!["completed_phase".into(), "next_focus".into(), "keep".into(), "verification".into()]), Some(false.into())),
++            output_schema: None,
++        })
++    }
++    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
++    where
++        ToolInvocation: 'a,
++    {
++        Box::pin(async move {
++            let ToolPayload::Function { arguments } = invocation.payload else {
++                return Err(FunctionCallError::RespondToModel(
++                    "compact_context requires function arguments".into(),
++                ));
++            };
++            let checkpoint =
++                SemanticCheckpoint::parse(&arguments).map_err(FunctionCallError::RespondToModel)?;
++            let mut state = invocation.turn.semantic_compaction.lock().await;
++            if state.pending.is_some() {
++                return Err(FunctionCallError::RespondToModel("A checkpoint is already pending. Wait for compaction and continuation before requesting another.".into()));
++            }
++            state.pending = Some(checkpoint);
++            Ok(boxed_tool_output(FunctionToolOutput::from_text(
++                "Checkpoint accepted. After this complete tool batch, the harness will compact and resume unless new input is pending.".into(), Some(true))))
++        })
++    }
++}
++impl CoreToolRuntime for CompactContextHandler {}
+diff --git a/codex-rs/core/src/tools/handlers/mod.rs b/codex-rs/core/src/tools/handlers/mod.rs
+index ce09df5b3..488591419 100644
+--- a/codex-rs/core/src/tools/handlers/mod.rs
++++ b/codex-rs/core/src/tools/handlers/mod.rs
+@@ -1,5 +1,6 @@
+ pub(crate) mod apply_patch;
+ pub(crate) mod apply_patch_spec;
++pub(crate) mod compact_context;
+ mod current_time;
+ mod dynamic;
+ pub(crate) mod extension_tools;
+@@ -14,6 +15,7 @@ pub(crate) mod multi_agents;
+ pub(crate) mod multi_agents_common;
+ pub(crate) mod multi_agents_spec;
+ pub(crate) mod multi_agents_v2;
++pub use compact_context::CompactContextHandler;
+ mod new_context_window;
+ pub(crate) mod new_context_window_spec;
+ mod plan;
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index ac1ca687b..a43896e65 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -1096,6 +1096,13 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
+     let features = turn_context.config.features.get();
+     let environment_mode = tool_environment_mode(context.environments);
+ 
++    if !features.enabled(Feature::TokenBudget) {
++        registry.add_with_exposure(
++            crate::tools::handlers::CompactContextHandler,
++            ToolExposure::DirectModelOnly,
++        );
++    }
++
+     if turn_context.config.update_plan_enabled {
+         registry.add(PlanHandler);
+     }
+diff --git a/codex-rs/core/tests/suite/compact_context.rs b/codex-rs/core/tests/suite/compact_context.rs
+new file mode 100644
+index 000000000..657187ddd
+--- /dev/null
++++ b/codex-rs/core/tests/suite/compact_context.rs
+@@ -0,0 +1,269 @@
++//! Semantic compaction must preserve a complete tool batch and resume in the same turn.
++use anyhow::Result;
++use codex_login::CodexAuth;
++use core_test_support::responses::sse;
++use core_test_support::responses::{self};
++use core_test_support::test_codex::test_codex;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn compact_context_preserves_batch_and_checkpoint() -> Result<()> {
++    let server = wiremock::MockServer::start().await;
++    let checkpoint = json!({
++        "completed_phase": "Auth repaired",
++        "next_focus": "Migration rollback",
++        "keep": ["Issuer validation preserved"],
++        "open_loops": ["Rollback missing"],
++        "ruled_out": ["Redis expiry"],
++        "verification": ["Auth tests passed"]
++    });
++    let mock = responses::mount_sse_sequence(&server, vec![
++        sse(vec![
++            responses::ev_function_call("checkpoint", "compact_context", &checkpoint.to_string()),
++            responses::ev_function_call("sibling", "update_plan", r#"{"plan":[{"step":"Migration rollback","status":"in_progress"}]}"#),
++            responses::ev_function_call("duplicate", "compact_context", &checkpoint.to_string()),
++                responses::ev_completed("phase-one"),
++        ]),
++        sse(vec![
++            json!({"type":"response.output_item.done","item":{"type":"compaction","encrypted_content":"SEMANTIC_STATE"}}),
++            responses::ev_completed("compacted"),
++        ]),
++        sse(vec![responses::ev_assistant_message("done", "Migration next"), responses::ev_completed("continued")]),
++    ]).await;
++    let test = test_codex()
++        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
++        .with_config(|config| {
++            config.update_plan_enabled = true;
++            config.model_auto_compact_token_limit = Some(1_000_000);
++        })
++        .build_with_auto_env(&server)
++        .await?;
++    test.submit_turn("Repair auth, then handle migration rollback")
++        .await?;
++    let requests = mock.requests();
++    assert_eq!(requests.len(), 3);
++    let compact = requests[1].body_json();
++    assert_eq!(
++        compact["input"].as_array().unwrap().last().unwrap()["type"],
++        "compaction_trigger"
++    );
++    for call_id in ["checkpoint", "sibling", "duplicate"] {
++        assert!(
++            compact["input"]
++                .as_array()
++                .unwrap()
++                .iter()
++                .any(|item| item["type"] == "function_call_output" && item["call_id"] == call_id)
++        );
++    }
++    assert!(compact.to_string().contains("already pending"));
++    let continuation = requests[2].body_json().to_string();
++    assert!(continuation.contains("SEMANTIC_STATE"));
++    assert!(continuation.contains("Migration rollback"));
++    assert!(continuation.contains("Auth tests passed"));
++    assert!(continuation.contains("Redis expiry"));
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn compact_context_rejects_invalid_checkpoint_without_compacting() -> Result<()> {
++    let server = wiremock::MockServer::start().await;
++    let mock = responses::mount_sse_sequence(&server, vec![
++        sse(vec![
++            responses::ev_function_call("missing-proof", "compact_context", r#"{"completed_phase":"Done","next_focus":"Next","keep":["Fact"],"verification":[]}"#),
++            responses::ev_function_call("missing-fields", "compact_context", &json!({"completed_phase":"Done"}).to_string()),
++            responses::ev_completed("invalid"),
++        ]),
++        sse(vec![responses::ev_assistant_message("done", "Continue without compacting"), responses::ev_completed("continued")]),
++    ]).await;
++    let test = test_codex()
++        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
++        .build_with_auto_env(&server)
++        .await?;
++    test.submit_turn("Continue working").await?;
++    let requests = mock.requests();
++    assert_eq!(requests.len(), 2);
++    let continuation = requests[1].body_json().to_string();
++    assert!(continuation.contains("concrete verification"));
++    assert!(continuation.contains("missing field"));
++    assert!(!continuation.contains("compaction_trigger"));
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn compact_context_preserves_large_checkpoints_without_retry() -> Result<()> {
++    for checkpoint in [
++        json!({"completed_phase":"Verified", "next_focus":"Proceed", "keep":["界🦀".repeat(10_000)], "verification":["Tests passed"]}),
++        json!({"completed_phase":"Verified", "next_focus":"Proceed", "keep":(0..100).map(|i| format!("Fact {i}")).collect::<Vec<_>>(), "verification":["Tests passed"]}),
++        // Below the old raw limit, above it once default fields are serialized.
++        json!({"completed_phase":"Verified", "next_focus":"Proceed", "keep":["x".repeat(660)], "verification":["Tests passed"]}),
++    ] {
++        let server = wiremock::MockServer::start().await;
++        let arguments = checkpoint.to_string();
++        let mock = responses::mount_sse_sequence(&server, vec![
++            sse(vec![responses::ev_function_call("checkpoint", "compact_context", &arguments), responses::ev_completed("phase")]),
++            sse(vec![json!({"type":"response.output_item.done","item":{"type":"compaction","encrypted_content":"LARGE_CHECKPOINT_SUMMARY"}}), responses::ev_completed("compacted")]),
++            sse(vec![responses::ev_assistant_message("done", "Continuing"), responses::ev_completed("continued")]),
++        ]).await;
++        let test = test_codex()
++            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
++            .with_config(|config| config.model_auto_compact_token_limit = Some(1_000_000))
++            .build_with_auto_env(&server)
++            .await?;
++        test.submit_turn("Complete this phase, then continue")
++            .await?;
++        let requests = mock.requests();
++        assert_eq!(requests.len(), 3);
++        let compact = requests[1].body_json();
++        let input = compact["input"].as_array().unwrap();
++        assert_eq!(input.last().unwrap()["type"], "compaction_trigger");
++        let call = input
++            .iter()
++            .find(|item| item["type"] == "function_call" && item["call_id"] == "checkpoint")
++            .unwrap();
++        assert_eq!(call["arguments"], arguments);
++        assert!(compact.to_string().contains("Checkpoint accepted"));
++        let continuation = requests[2].body_json().to_string();
++        assert!(continuation.contains("LARGE_CHECKPOINT_SUMMARY"));
++        let body = requests[2].body_json();
++        let checkpoint_text = body["input"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .filter_map(|item| item["content"].as_array())
++            .flatten()
++            .filter_map(|part| part["text"].as_str())
++            .find(|text| text.starts_with("<semantic_checkpoint>"))
++            .expect("full checkpoint injected after compaction");
++        let serialized = checkpoint_text
++            .lines()
++            .find(|line| line.starts_with('{'))
++            .unwrap();
++        let actual: serde_json::Value = serde_json::from_str(serialized)?;
++        let mut expected = checkpoint.clone();
++        expected["open_loops"] = json!([]);
++        expected["ruled_out"] = json!([]);
++        assert_eq!(actual, expected);
++    }
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn compact_context_continues_beyond_four_checkpoints_in_one_turn() -> Result<()> {
++    let server = wiremock::MockServer::start().await;
++    let mut sequence = Vec::new();
++    for phase in 0..6 {
++        let checkpoint = json!({"completed_phase":format!("Phase {phase} verified"), "next_focus":format!("Phase {}", phase + 1), "keep":["Continue the user's long-running objective"], "verification":["Phase tests passed"]});
++        sequence.push(sse(vec![
++            responses::ev_function_call(
++                &format!("checkpoint-{phase}"),
++                "compact_context",
++                &checkpoint.to_string(),
++            ),
++            responses::ev_completed(&format!("phase-{phase}")),
++        ]));
++        sequence.push(sse(vec![json!({"type":"response.output_item.done","item":{"type":"compaction","encrypted_content":format!("STATE_{phase}")}}), responses::ev_completed(&format!("compacted-{phase}"))]));
++    }
++    sequence.push(sse(vec![
++        responses::ev_assistant_message("done", "All six phases complete"),
++        responses::ev_completed("complete"),
++    ]));
++    let mock = responses::mount_sse_sequence(&server, sequence).await;
++    let test = test_codex()
++        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
++        .with_config(|config| config.model_auto_compact_token_limit = Some(1_000_000))
++        .build_with_auto_env(&server)
++        .await?;
++    test.submit_turn("Complete six independent verified phases without stopping")
++        .await?;
++    let requests = mock.requests();
++    assert_eq!(requests.len(), 13);
++    for phase in 0..6 {
++        let body = requests[phase * 2 + 1].body_json();
++        assert_eq!(
++            body["input"].as_array().unwrap().last().unwrap()["type"],
++            "compaction_trigger"
++        );
++        let continued = requests[phase * 2 + 2].body_json().to_string();
++        assert!(continued.contains(&format!("Phase {phase} verified")));
++        assert!(continued.contains(&format!("STATE_{phase}")));
++    }
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn compact_context_cancels_when_user_steers_during_sibling_tool() -> Result<()> {
++    use codex_core::StartThreadOptions;
++    use codex_core::TurnInputRequest;
++    use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
++    use codex_protocol::dynamic_tools::DynamicToolResponse;
++    use codex_protocol::dynamic_tools::DynamicToolSpec;
++    use codex_protocol::protocol::EventMsg;
++    use codex_protocol::protocol::Op;
++    use codex_protocol::user_input::UserInput;
++    use core_test_support::wait_for_event;
++    let server = wiremock::MockServer::start().await;
++    let mock = responses::mount_sse_sequence(&server, vec![
++        sse(vec![
++            responses::ev_function_call("checkpoint", "compact_context", r#"{"completed_phase":"Done","next_focus":"Migration","keep":["Fact"],"verification":["Tests pass"]}"#),
++            responses::ev_function_call("barrier", "barrier", "{}"),
++            responses::ev_completed("phase"),
++        ]),
++        sse(vec![responses::ev_assistant_message("done", "Following the correction"), responses::ev_completed("continued")]),
++    ]).await;
++    let base = test_codex()
++        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
++        .build_with_auto_env(&server)
++        .await?;
++    let thread = base
++        .thread_manager
++        .start_thread(StartThreadOptions {
++            dynamic_tools: vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
++                name: "barrier".into(),
++                description: "Wait for external result".into(),
++                input_schema: json!({"type":"object","properties":{}}),
++                defer_loading: false,
++            })],
++            ..StartThreadOptions::new(base.config.clone())
++        })
++        .await?
++        .thread;
++    thread
++        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++            text: "Complete the phase, then migration".into(),
++            text_elements: vec![],
++        }]))
++        .await?;
++    let EventMsg::DynamicToolCallRequest(request) = wait_for_event(&thread, |event| {
++        matches!(event, EventMsg::DynamicToolCallRequest(_))
++    })
++    .await
++    else {
++        unreachable!("matched dynamic tool request")
++    };
++    // The sibling tool cannot finish until this response: no timing-based sleeps.
++    thread
++        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++            text: "Correction: investigate billing first".into(),
++            text_elements: vec![],
++        }]))
++        .await?;
++    thread
++        .submit(Op::DynamicToolResponse {
++            id: request.call_id,
++            response: DynamicToolResponse {
++                content_items: vec![],
++                success: true,
++            },
++        })
++        .await?;
++    wait_for_event(&thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
++    let requests = mock.requests();
++    assert_eq!(requests.len(), 2);
++    let continuation = requests[1].body_json().to_string();
++    assert!(!continuation.contains("compaction_trigger"));
++    assert!(continuation.contains("investigate billing first"));
++    assert!(!continuation.contains("<semantic_checkpoint>"));
++    Ok(())
++}
+diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
+index 59e4019e6..e072dce2a 100644
+--- a/codex-rs/core/tests/suite/mod.rs
++++ b/codex-rs/core/tests/suite/mod.rs
+@@ -56,6 +56,7 @@ mod codex_apps_protocol;
+ mod codex_delegate;
+ mod collaboration_instructions;
+ mod compact;
++mod compact_context;
+ mod compact_remote;
+ mod compact_resume_fork;
+ mod context_annotations;
