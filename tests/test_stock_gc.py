@@ -120,6 +120,12 @@ class AdapterTests(unittest.TestCase):
         self.a.from_server(msg)
         self.assertEqual(self.client[-1], msg)
 
+    def test_empty_start_params_receive_tool_and_hook_config(self):
+        request = {'id': 'empty', 'method': 'thread/start', 'params': {}}
+        self.a.from_client(request)
+        self.assertEqual(self.server[-1]['params']['dynamicTools'], [TOOL])
+        self.assertTrue(self.server[-1]['params']['config']['features.hooks'])
+
     def test_missing_hooks_omit_tool(self):
         self.a.hook_trust = {}
         self.a.from_client({'id': 2, 'method': 'thread/start', 'params': {}})

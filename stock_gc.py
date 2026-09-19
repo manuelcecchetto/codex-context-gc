@@ -72,7 +72,17 @@ class Adapter:
         self.starts = set()
         self.owned = set()
         self.initialize_reply = None
+        self.status = {'pid': os.getpid(), 'initialize_seen': False, 'hook_count': 0, 'thread_starts_seen': 0, 'tools_added': 0}
+        self.write_status()
         self.hook_command = shlex.join([sys.executable, str(Path(__file__).with_name("stock_gc_hook.py")), hook_socket]) if hook_socket else None
+
+    def write_status(self):
+        # Diagnostic counters only: never record prompts, arguments, or credentials.
+        self.journal.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = self.journal / ('adapter-' + str(os.getpid()) + '.status')
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w') as output:
+            json.dump(self.status, output)
 
     def rpc(self, method, params, thread, phase):
         self.seq += 1
@@ -91,7 +101,14 @@ class Adapter:
 
     def from_client(self, message):
         method, params = message.get('method'), message.get('params') or {}
+        if method in ('initialize', 'thread/start', 'thread/resume'):
+            message['params'] = params
+        if method == 'thread/start':
+            self.status['thread_starts_seen'] += 1
+            self.write_status()
         if method == 'initialize':
+            self.status['initialize_seen'] = True
+            self.write_status()
             self.initialize_id = message.get('id')
             params.setdefault('capabilities', {})['experimentalApi'] = True
         if method in ('thread/start', 'thread/resume') and len(self.hook_trust) == 2:
@@ -106,6 +123,8 @@ class Adapter:
             # Never replace a tool supplied by the caller.
             if not any(t.get('name') == TOOL['name'] for t in tools):
                 tools.append(TOOL)
+                self.status['tools_added'] += 1
+                self.write_status()
                 self.starts.add(message.get('id'))
         if method in ('turn/start', 'turn/steer', 'turn/interrupt', 'thread/compact/start',
                       'thread/rollback', 'thread/unsubscribe', 'thread/archive'):
@@ -153,6 +172,10 @@ class Adapter:
                     for hook in group.get('hooks', []):
                         if hook.get('source') == 'sessionFlags' and hook.get('command') == self.hook_command and hook.get('eventName') in ('stop', 'postCompact'):
                             self.hook_trust[hook['key']] = {'enabled': True, 'trusted_hash': hook['currentHash']}
+                self.status['hook_count'] = len(self.hook_trust)
+                self.status['discovery_error_code'] = (message.get('error') or {}).get('code')
+                self.status['discovery_groups'] = len(message.get('result', {}).get('data', []))
+                self.write_status()
                 if len(self.hook_trust) != 2:
                     self.report('GC: could not register both coordinator hooks; checkpoint tool disabled.')
                 self.client(self.initialize_reply)

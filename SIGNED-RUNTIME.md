@@ -4,7 +4,7 @@ The original Rust patch replaces the app's signed CLI with a locally built CLI. 
 
 This candidate keeps the original OpenAI-signed CLI. A small local Python adapter adds the GC tool through the app-server protocol. The desktop-launched process executes the original binary at the same PID, retaining its desktop parent; a child handles stdio forwarding. The app bundle and native peer authorization remain unchanged.
 
-**Status:** local integration tests pass against the pinned bundled runtime, including six compactions within an active goal. Live desktop browser/app-tools verification after relaunch is still pending. This is a candidate repair, not a verified desktop release.
+**Status:** local integration tests pass against the pinned bundled runtime, including six compactions within an active goal. Live desktop browser and app-tools reads passed after relaunch. However, new desktop tasks did not receive the GC tool; desktop registration remains unresolved. Redacted startup/registration counters are saved as `adapter-<pid>.status` in the checkpoint directory for diagnosis. This is a candidate repair, not a verified desktop release.
 
 ## Try the candidate
 
