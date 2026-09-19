@@ -1,4 +1,6 @@
+import io
 import json
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -62,6 +64,28 @@ class ManageTests(unittest.TestCase):
             manage.launch(self.root)
             self.assertEqual(version.call_count, 2)
             self.assertEqual(execute.call_args.args[2]['CODEX_CLI_PATH'], str(binary))
+
+    def test_doctor_reads_both_signatures_without_launching(self):
+        app = self.root / 'App.app'
+        binary = self.root / 'codex'
+        (self.root / 'installation.json').write_text(json.dumps({'app': str(app), 'binary': str(binary)}))
+        signed = subprocess.CompletedProcess([], 0, '', 'Identifier=codex\nTeamIdentifier=EXAMPLE\nAuthority=Example vendor\n')
+        adhoc = subprocess.CompletedProcess([], 0, '', 'Signature=adhoc\nTeamIdentifier=not set\n')
+        with patch('manage.platform.system', return_value='Darwin'), patch('manage.subprocess.run', side_effect=[signed, adhoc]) as calls, patch('sys.stdout', new_callable=io.StringIO) as out, patch('sys.stderr', new_callable=io.StringIO) as err, patch('manage.os.execve') as execute:
+            manage.doctor(self.root)
+            self.assertEqual([c.args[0][-1] for c in calls.call_args_list], [str(app / 'Contents/Resources/codex'), str(binary)])
+            self.assertTrue(all(c.args[0][:3] == ['codesign', '-d', '--verbose=4'] for c in calls.call_args_list))
+            self.assertIn('TeamIdentifier=not set', out.getvalue())
+            self.assertIn('not a live browser compatibility test', out.getvalue())
+            self.assertIn('missing-code-signing-identity', err.getvalue())
+            execute.assert_not_called()
+
+    def test_doctor_reports_unavailable_signature(self):
+        (self.root / 'installation.json').write_text(json.dumps({'app': '/App.app', 'binary': '/custom'}))
+        failed = subprocess.CompletedProcess([], 1, '', 'not signed')
+        with patch('manage.platform.system', return_value='Darwin'), patch('manage.subprocess.run', return_value=failed), patch('sys.stdout', new_callable=io.StringIO) as out, patch('sys.stderr', new_callable=io.StringIO):
+            manage.doctor(self.root)
+            self.assertEqual(out.getvalue().count('Signing metadata unavailable'), 2)
 
     def test_install_pins_source_and_validates_before_receipt(self):
         prefix = self.root / 'install'

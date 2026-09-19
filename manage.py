@@ -34,6 +34,41 @@ def check_version(binary):
         raise RuntimeError(f'{binary}: found {actual}; requires {expected}. Ask your agent to port and test the patch against your installed version; do not bypass this guard.')
 
 
+BROWSER_NOTICE = (
+    'Known macOS desktop limitation: this custom-built CLI is not signed by OpenAI. '
+    'The desktop browser and app-tools bridges can reject it with '
+    'missing-code-signing-identity. A successful build or initialization smoke test '
+    'does not verify those bridges. Use stock desktop Codex when they are required; '
+    'see README for details.'
+)
+
+
+def desktop_notice():
+    print(BROWSER_NOTICE, file=sys.stderr, flush=True)
+
+
+def doctor(prefix):
+    """Read signing metadata without changing signatures or starting the app."""
+    state = json.loads((prefix / 'installation.json').read_text())
+    app, binary = Path(state['app']), Path(state['binary'])
+    desktop_notice()
+    if platform.system() != 'Darwin':
+        raise RuntimeError('Signing diagnostics currently support macOS only.')
+    for label, executable in [('Bundled CLI', app / 'Contents/Resources/codex'),
+                              ('Custom CLI', binary)]:
+        result = subprocess.run(['codesign', '-d', '--verbose=4', str(executable)],
+                                capture_output=True, text=True)
+        print(f'{label}: {executable}')
+        metadata = result.stdout + result.stderr
+        for line in metadata.splitlines():
+            if line.startswith(('Identifier=', 'Signature=', 'Authority=', 'TeamIdentifier=')):
+                print('  ' + line)
+        if result.returncode:
+            print('  Signing metadata unavailable (codesign exit '
+                  + str(result.returncode) + ').')
+    print('This is a signing diagnostic, not a live browser compatibility test.')
+
+
 def configure(path, level):
     """Update only our marked block, retaining a backup when content changes."""
     text = path.read_text() if path.exists() else ''
@@ -103,6 +138,7 @@ def install(prefix, app):
     for command in ['git', 'cargo', 'rustup', 'just']:
         if shutil.which(command) is None:
             raise RuntimeError(f'Missing {command}; see README prerequisites.')
+    desktop_notice()
     # Fail before downloads, builds, or instruction changes on version mismatch.
     check_version(app / 'Contents/Resources/codex')
     output('cargo', 'nextest', '--version')
@@ -137,6 +173,7 @@ def install(prefix, app):
 
 
 def launch(prefix):
+    desktop_notice()
     state = json.loads((prefix / 'installation.json').read_text())
     app, binary = Path(state['app']), Path(state['binary'])
     check_version(app / 'Contents/Resources/codex')
@@ -158,12 +195,15 @@ def main():
     build = sub.add_parser('install')
     build.add_argument('--app', type=Path, default=Path('/Applications/ChatGPT.app'))
     sub.add_parser('launch')
+    sub.add_parser('doctor')
     instructions = sub.add_parser('instructions')
     instructions.add_argument('level', choices=['install', 'off'])
     instructions.add_argument('--instructions', type=Path, default=Path(os.environ.get('CODEX_HOME', str(Path.home() / '.codex'))) / 'AGENTS.md')
     args = parser.parse_args()
     if args.command == 'install':
         install(args.prefix.expanduser().resolve(), args.app.expanduser().resolve())
+    elif args.command == 'doctor':
+        doctor(args.prefix.expanduser().resolve())
     elif args.command == 'launch':
         launch(args.prefix.expanduser().resolve())
     else:

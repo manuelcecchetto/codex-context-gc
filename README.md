@@ -4,6 +4,8 @@
 
 This small, experimental patch adds a `compact_context` tool to Codex. The model records what it has learned, asks Codex to run its native compaction, and continues the same task with those notes intact.
 
+**Known macOS desktop incompatibility:** the custom-built CLI can be rejected by the in-app browser and dynamic app-tools bridges with `missing-code-signing-identity`. This is reproduced in the author's desktop logs. The published build is **not fully desktop-compatible**. If you need these integrations, keep using the stock desktop executable. See [browser compatibility](#browser-compatibility) below.
+
 Inspired by [pi-context-gc](https://github.com/manuelcecchetto/pi-context-gc). Unofficial; not an OpenAI product.
 
 ## Install: ask Astra
@@ -12,7 +14,7 @@ Paste this into a Codex task using Astra:
 
 > Install https://github.com/manuelcecchetto/codex-context-gc for my local Codex desktop app. Read its README.md and INSTALL.md, check compatibility, and use its included compaction instructions. Preserve my existing setup and instructions. Build and test the patch, then give me the launch command. Don't quit my running app.
 
-**Currently tested:** macOS, Codex CLI `0.155.0-alpha.9`, desktop bundle `ChatGPT.app`. The installer checks the bundled CLI version, not the app's display version. Other operating systems and versions need a port and verification; the installer will not force an incompatible build.
+**Build and compaction tests:** macOS, Codex CLI `0.155.0-alpha.9`, desktop bundle `ChatGPT.app`. The installer checks the bundled CLI version, not the app's display version. Other operating systems and versions need a port and verification; the installer will not force an incompatible build.
 
 The repo ships source and a patch, not a prebuilt executable. The first Rust build can take a while and requires substantial free disk space.
 
@@ -112,6 +114,24 @@ python3 manage.py instructions off
 ```
 
 `off` removes the managed guidance; it does not hide the tool in a patched executable or disable native automatic compaction. You can remove the cloned repo and separate installation directory later after preserving anything you want to keep.
+
+## Browser compatibility
+
+The macOS desktop app authenticates local bridge clients using code-signing identities. The bundled Codex executable is OpenAI-signed; a local Rust build has an ad-hoc signature without OpenAI's team identity. Desktop logs show both browser and dynamic app-tools socket rejections with `missing-code-signing-identity`. The in-app browser may be missing from the tool inventory or report "Browser not available" while the normal app browser UI remains usable. Other desktop integrations using the same bridge may also be affected.
+
+This is a compatibility defect of the custom-executable installation approach, not evidence of failed compaction. The installer and app-server smoke test did not exercise these bridges. Matching the CLI version and linking the bundled code-mode host are insufficient. Self-signing cannot reproduce OpenAI's signing identity. This repository does not disable peer authorization or modify the signed app bundle.
+
+Inspect an installation without changing it:
+
+```sh
+python3 manage.py doctor
+```
+
+For a custom installation prefix, put `--prefix /path/to/install` before `doctor`. The command shows the bundled and custom executable signing metadata; it does not claim live browser compatibility.
+
+**Recovery:** quit the app normally and reopen it from Finder or the Dock, without the custom launcher. This restores the stock executable and removes this patch's `compact_context` tool. Confirm that your browser tools work again. External Chrome remained available in the author's session, but it is not a fix for the in-app browser integration.
+
+There is no verified fix that preserves both this custom executable and the signed desktop bridge. A future solution requires a supported integration with the stock runtime or an upstream change. Do not describe this issue as fixed until the in-app browser and dynamic app tools have been tested with the actual patched installation.
 
 ## App updates and compatibility
 
